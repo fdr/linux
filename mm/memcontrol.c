@@ -56,6 +56,8 @@
 
 #include <trace/events/vmscan.h>
 
+#define KILOBYTES(x) ((x) << (PAGE_SHIFT - 10))
+
 struct cgroup_subsys mem_cgroup_subsys __read_mostly;
 #define MEM_CGROUP_RECLAIM_RETRIES	5
 struct mem_cgroup *root_mem_cgroup __read_mostly;
@@ -100,6 +102,15 @@ enum mem_cgroup_events_index {
 	MEM_CGROUP_EVENTS_PGMAJFAULT,	/* # of major page-faults */
 	MEM_CGROUP_EVENTS_NSTATS,
 };
+
+/*
+ * Per memcg overcommit settings
+ */
+enum mem_cgroup_vmacct_index {
+	MEM_CGROUP_OVERCOMMIT_MEMORY,
+	MEM_CGROUP_OVERCOMMIT_RATIO,
+};
+
 /*
  * Per memcg event counter is incremented at every pagein/pageout. With THP,
  * it will be incremated by the number of pages. This counter is used for
@@ -373,6 +384,15 @@ static void mem_cgroup_get(struct mem_cgroup *memcg);
 static void mem_cgroup_put(struct mem_cgroup *memcg);
 static struct mem_cgroup *parent_mem_cgroup(struct mem_cgroup *memcg);
 static void drain_all_stock_async(struct mem_cgroup *memcg);
+static ssize_t mem_cgroup_committed_read(struct cgroup *cont,
+					 struct cftype *cft,
+					 struct file *file,
+					 char __user *userbuf,
+					 size_t nbytes,
+					 loff_t *ppos);
+static s64 mem_cgroup_vmacct_read_s64(struct cgroup *cont, struct cftype *cft);
+static int mem_cgroup_vmacct_write_s64(struct cgroup *cont, struct cftype *cft,
+				       s64 val);
 
 static struct mem_cgroup_per_zone *
 mem_cgroup_zoneinfo(struct mem_cgroup *memcg, int nid, int zid)
@@ -4734,6 +4754,22 @@ static struct cftype mem_cgroup_files[] = {
 		.unregister_event = mem_cgroup_oom_unregister_event,
 		.private = MEMFILE_PRIVATE(_OOM_TYPE, OOM_CONTROL),
 	},
+	{
+		.name = "overcommit_memory",
+		.private = MEM_CGROUP_OVERCOMMIT_MEMORY,
+		.read_s64 = mem_cgroup_vmacct_read_s64,
+		.write_s64 = mem_cgroup_vmacct_write_s64,
+	},
+	{
+		.name = "overcommit_ratio",
+		.private = MEM_CGROUP_OVERCOMMIT_RATIO,
+		.read_s64 = mem_cgroup_vmacct_read_s64,
+		.write_s64 = mem_cgroup_vmacct_write_s64,
+	},
+	{
+		.name = "overcommit_as",
+		.read = mem_cgroup_committed_read,
+	},
 #ifdef CONFIG_NUMA
 	{
 		.name = "numa_stat",
@@ -5727,5 +5763,94 @@ int mem_cgroup_vm_enough_memory_never(struct mm_struct *mm,
 		return 0;
 
 	return -ENOMEM;
-},
+}
 
+static ssize_t mem_cgroup_committed_read(struct cgroup *cont,
+					 struct cftype *cft,
+					 struct file *file,
+					 char __user *userbuf,
+					 size_t nbytes,
+					 loff_t *ppos)
+{
+	struct mem_cgroup *mem;
+	char *page;
+	unsigned long total, committed, allowed;
+	ssize_t count;
+	int ret;
+
+	page = (char *)__get_free_page(GFP_TEMPORARY);
+	if (unlikely(!page))
+		return -ENOMEM;
+
+	cgroup_lock();
+	if (cgroup_is_removed(cont)) {
+		cgroup_unlock();
+		ret = -ENODEV;
+		goto out;
+	}
+
+	mem = mem_cgroup_from_cont(cont);
+	committed = atomic_long_read(&mem->vmacct.vm_committed_space);
+
+	total = (long)(mem->res.limit >> PAGE_SHIFT) + 1L;
+	if (total > (totalram_pages - hugetlb_total_pages()))
+		allowed = ((totalram_pages - hugetlb_total_pages())
+			   * mem->vmacct.overcommit_ratio / 100)
+			+ total_swap_pages;
+	else
+		allowed = total * mem->vmacct.overcommit_ratio / 100
+			+ total_swap_pages;
+	cgroup_unlock();
+
+	count = sprintf(page, "CommitLimit:  %8lu kB\n"
+			"Committed_AS: %8lu kB\n",
+			KILOBYTES(allowed), KILOBYTES(committed));
+	ret = simple_read_from_buffer(userbuf, nbytes, ppos, page, count);
+out:
+	free_page((unsigned long)page);
+	return ret;
+}
+
+static s64 mem_cgroup_vmacct_read_s64(struct cgroup *cont, struct cftype *cft)
+{
+	struct mem_cgroup *mem = mem_cgroup_from_cont(cont);
+	enum mem_cgroup_vmacct_index type = cft->private;
+
+	switch (type) {
+	case MEM_CGROUP_OVERCOMMIT_MEMORY:
+		return mem->vmacct.overcommit_memory;
+	case MEM_CGROUP_OVERCOMMIT_RATIO:
+		return mem->vmacct.overcommit_ratio;
+	default:
+		BUG();
+	}
+}
+
+static int mem_cgroup_vmacct_write_s64(struct cgroup *cont, struct cftype *cft,
+				       s64 val)
+{
+	struct mem_cgroup *mem = mem_cgroup_from_cont(cont);
+	enum mem_cgroup_vmacct_index type = cft->private;
+	int ret = 0;
+
+	cgroup_lock();
+	if (cgroup_is_removed(cont)) {
+		cgroup_unlock();
+		return -ENODEV;
+	}
+
+	switch (type) {
+	case MEM_CGROUP_OVERCOMMIT_MEMORY:
+		mem->vmacct.overcommit_memory = (int)val;
+		break;
+	case MEM_CGROUP_OVERCOMMIT_RATIO:
+		mem->vmacct.overcommit_ratio = (int)val;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	cgroup_unlock();
+
+	return ret;
+}
