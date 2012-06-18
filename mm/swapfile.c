@@ -1594,7 +1594,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 		goto out_dput;
 	}
 	if (!security_vm_enough_memory(p->pages))
-		vm_unacct_memory(p->pages);
+		vm_unacct_memory(current->mm, p->pages);
 	else {
 		err = -ENOMEM;
 		spin_unlock(&swap_lock);

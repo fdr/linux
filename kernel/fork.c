@@ -293,6 +293,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	 * parent)
 	 */
 	atomic_set(&tsk->usage, 2);
+
+#ifdef CONFIG_CGROUP_MEM_RES_CTLR
+	atomic_long_set(&tsk->vm_committed_space, 0);
+#endif
 #ifdef CONFIG_BLK_DEV_IO_TRACE
 	tsk->btrace_seq = 0;
 #endif
@@ -436,7 +440,7 @@ fail_nomem_policy:
 	kmem_cache_free(vm_area_cachep, tmp);
 fail_nomem:
 	retval = -ENOMEM;
-	vm_unacct_memory(charge);
+	vm_unacct_memory(mm, charge);
 	goto out;
 }
 

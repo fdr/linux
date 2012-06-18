@@ -256,7 +256,7 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 
 	if (do_munmap(mm, old_addr, old_len) < 0) {
 		/* OOM: unable to split vma, just get accounts right */
-		vm_unacct_memory(excess >> PAGE_SHIFT);
+		vm_unacct_memory(mm, excess >> PAGE_SHIFT);
 		excess = 0;
 	}
 	mm->hiwater_vm = hiwater_vm;
@@ -397,7 +397,7 @@ static unsigned long mremap_to(unsigned long addr,
 	if (!(ret & ~PAGE_MASK))
 		goto out;
 out1:
-	vm_unacct_memory(charged);
+        vm_unacct_memory(mm, charged);
 
 out:
 	return ret;
@@ -528,7 +528,7 @@ unsigned long do_mremap(unsigned long addr,
 	}
 out:
 	if (ret & ~PAGE_MASK)
-		vm_unacct_memory(charged);
+                vm_unacct_memory(mm, charged);
 	return ret;
 }
 

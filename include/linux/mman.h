@@ -12,6 +12,10 @@
 
 #ifdef __KERNEL__
 #include <linux/mm.h>
+#include <linux/mm_types.h>
+#include <linux/hugetlb.h>
+#include <linux/swap.h>
+
 #include <linux/percpu_counter.h>
 
 #include <linux/atomic.h>
@@ -20,14 +24,119 @@ extern int sysctl_overcommit_memory;
 extern int sysctl_overcommit_ratio;
 extern struct percpu_counter vm_committed_as;
 
-static inline void vm_acct_memory(long pages)
+struct vm_acct_values {
+        int overcommit_memory;
+        int overcommit_ratio;
+        atomic_long_t vm_committed_space;
+};
+
+#ifdef CONFIG_CGROUP_MEM_RES_CTLR
+
+extern void mem_cgroup_vm_acct_memory(struct mm_struct *mm, long pages);
+extern void vm_acct_get_config(const struct mm_struct *mm,
+                               struct vm_acct_values *v);
+
+#else /* CONFIG_CGROUP_MEM_RES_CTLR */
+
+static inline void mem_cgroup_vm_acct(struct mm_struct *mm, long pages);
 {
-	percpu_counter_add(&vm_committed_as, pages);
 }
 
-static inline void vm_unacct_memory(long pages)
+static inline void vm_acct_get_config(const struct mm_struct *mm,
+                                      struct vm_acct_values *v)
 {
-	vm_acct_memory(-pages);
+        v->overcommit_memory = sysctl_overcommit_memory;
+        v->overcommit_ratio = sysctl_overcommit_ratio;
+}
+
+#endif /* CONFIG_CGROUP_MEM_RES_CTLR */
+
+static inline void vm_acct_memory(struct mm_struct *mm, long pages)
+{
+        percpu_counter_add(&vm_committed_as, pages);
+        mem_cgroup_vm_acct_memory(mm, pages);
+}
+
+static inline void vm_unacct_memory(struct mm_struct *mm, long pages)
+{
+        vm_acct_memory(mm, -pages);
+}
+
+static inline int __vm_enough_memory_guess(struct mm_struct *mm,
+                                           long pages,
+                                           int cap_sys_admin)
+
+{
+        unsigned long free;
+
+        free = global_page_state(NR_FREE_PAGES);
+        free += global_page_state(NR_FILE_PAGES);
+
+        /*
+         * shmem pages shouldn't be counted as free in this
+         * case, they can't be purged, only swapped out, and
+         * that won't affect the overall amount of available
+         * memory in the system.
+         */
+        free -= global_page_state(NR_SHMEM);
+
+        free += nr_swap_pages;
+
+        /*
+         * Any slabs which are created with the
+         * SLAB_RECLAIM_ACCOUNT flag claim to have contents
+         * which are reclaimable, under pressure.  The dentry
+         * cache and most inode caches should fall into this
+         */
+        free += global_page_state(NR_SLAB_RECLAIMABLE);
+
+        /*
+         * Leave reserved pages. The pages are not for anonymous pages.
+         */
+        if (free <= totalreserve_pages)
+                goto error;
+        else
+                free -= totalreserve_pages;
+
+        /*
+         * Leave the last 3% for root
+         */
+        if (!cap_sys_admin)
+                free -= free / 32;
+
+        if (free > pages)
+                return 0;
+
+error:
+        return -ENOMEM;
+
+}
+
+static inline int __vm_enough_memory_never(struct mm_struct *mm,
+                                           long pages,
+                                           int cap_sys_admin)
+{
+        unsigned long allowed;
+
+        allowed = (totalram_pages - hugetlb_total_pages())
+                * sysctl_overcommit_ratio / 100;
+
+        /*
+         * Leave the last 3% for root
+         */
+        if (!cap_sys_admin)
+                allowed -= allowed / 32;
+        allowed += total_swap_pages;
+
+        /* Don't let a single process grow too big:
+           leave 3% of the size of this process for other processes */
+        if (mm)
+                allowed -= mm->total_vm / 32;
+
+        if (percpu_counter_read_positive(&vm_committed_as) < allowed)
+                return 0;
+
+        return -ENOMEM;
 }
 
 /*

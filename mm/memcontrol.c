@@ -25,6 +25,7 @@
 #include <linux/memcontrol.h>
 #include <linux/cgroup.h>
 #include <linux/mm.h>
+#include <linux/mman.h>
 #include <linux/hugetlb.h>
 #include <linux/pagemap.h>
 #include <linux/smp.h>
@@ -286,6 +287,11 @@ struct mem_cgroup {
 	 */
 	struct mem_cgroup_stat_cpu nocpu_base;
 	spinlock_t pcp_counter_lock;
+
+	/*
+	 * VM overcommit settings
+	 */
+	struct vm_acct_values vmacct;
 };
 
 /* Stuffs for move charges at task migration. */
@@ -4969,11 +4975,21 @@ mem_cgroup_create(struct cgroup_subsys *ss, struct cgroup *cont)
 			INIT_WORK(&stock->work, drain_local_stock);
 		}
 		hotcpu_notifier(memcg_cpu_hotplug_callback, 0);
+                memcg->vmacct.overcommit_memory = sysctl_overcommit_memory;
+                memcg->vmacct.overcommit_ratio = sysctl_overcommit_ratio;
 	} else {
 		parent = mem_cgroup_from_cont(cont->parent);
 		memcg->use_hierarchy = parent->use_hierarchy;
 		memcg->oom_kill_disable = parent->oom_kill_disable;
-	}
+                memcg->vmacct.overcommit_memory =
+                        (mem_cgroup_from_cont(cont->parent)
+                         ->vmacct.overcommit_memory);
+                memcg->vmacct.overcommit_ratio =
+                        (mem_cgroup_from_cont(cont->parent)
+                         ->vmacct.overcommit_ratio);
+        }
+
+        atomic_long_set(&memcg->vmacct.vm_committed_space, 0);
 
 	if (parent && parent->use_hierarchy) {
 		res_counter_init(&memcg->res, &parent->res);
@@ -5513,7 +5529,17 @@ static void mem_cgroup_move_task(struct cgroup_subsys *ss,
 				struct cgroup *old_cont,
 				struct task_struct *p)
 {
+	long committed;
+	struct mem_cgroup *memcg = mem_cgroup_from_cont(cont);
+	struct mem_cgroup *old_memcg = mem_cgroup_from_cont(old_cont);
 	struct mm_struct *mm = get_task_mm(p);
+
+	preempt_disable();
+	committed = atomic_long_read(&p->vm_committed_space);
+	atomic_long_sub(committed, &old_memcg->vmacct.vm_committed_space);
+	atomic_long_add(committed, &memcg->vmacct.vm_committed_space);
+	mm->charged = memcg;
+	preempt_enable();
 
 	if (mm) {
 		if (mc.to)
@@ -5571,3 +5597,135 @@ static int __init enable_swap_account(char *s)
 __setup("swapaccount=", enable_swap_account);
 
 #endif
+
+void vm_acct_get_config(const struct mm_struct *mm, struct vm_acct_values *v)
+{
+	struct mem_cgroup *mem;
+	long tmp;
+
+	BUG_ON(!mm);
+
+	rcu_read_lock();
+	mem = mem_cgroup_from_task(rcu_dereference(mm->owner));
+	v->overcommit_memory = mem->vmacct.overcommit_memory;
+	v->overcommit_ratio = mem->vmacct.overcommit_ratio;
+	tmp = atomic_long_read(&mem->vmacct.vm_committed_space);
+	atomic_long_set(&v->vm_committed_space, tmp);
+	rcu_read_unlock();
+}
+
+void mem_cgroup_vm_acct_memory(struct mm_struct *mm, long pages)
+{
+	struct mem_cgroup *memcg;
+	struct task_struct *tsk;
+
+	if (!mm)
+	{
+		return;
+	}
+
+	rcu_read_lock();
+
+	tsk = rcu_dereference(mm->owner);
+	if (likely(tsk))
+	{
+		atomic_long_add(pages, &tsk->vm_committed_space);
+		mm->charged = mem_cgroup_from_task(tsk);
+	}
+
+	memcg = mm->charged;
+
+	/* Update memory cgroup statistic */
+	if (likely(memcg))
+	{
+		atomic_long_add(pages, &memcg->vmacct.vm_committed_space);
+	}
+
+	rcu_read_unlock();
+}
+
+int mem_cgroup_vm_enough_memory_guess(struct mm_struct *mm,
+				      long pages,
+				      int cap_sys_admin)
+{
+	unsigned long allowed, free;
+	struct mem_cgroup *memcg;
+	long total, rss, cache;
+
+	rcu_read_lock();
+	memcg = mem_cgroup_from_task(rcu_dereference(mm->owner));
+	total = (long) (memcg->res.limit >> PAGE_SHIFT) + 1L;
+	cache = (long) mem_cgroup_read_stat(memcg, MEM_CGROUP_STAT_CACHE);
+	rss   = (long) mem_cgroup_read_stat(memcg, MEM_CGROUP_STAT_RSS);
+	rcu_read_unlock();
+
+	free = cache;
+	free += nr_swap_pages;
+
+	/*
+	 * Leave the last 3% for root
+	 */
+	if (!cap_sys_admin)
+		free -= free / 32;
+
+	if (free > pages)
+		return 0;
+
+	allowed = total - rss;
+
+	/*
+	 * Leave the last 3% for root
+	 */
+	if (!cap_sys_admin)
+		allowed -= allowed / 32;
+
+	free += allowed;
+
+	if (free > pages)
+		return 0;
+
+	return -ENOMEM;
+}
+
+int mem_cgroup_vm_enough_memory_never(struct mm_struct *mm,
+				      long pages,
+				      int cap_sys_admin)
+{
+	unsigned long allowed;
+	struct vm_acct_values v;
+	struct mem_cgroup *memcg;
+	long total;
+
+	rcu_read_lock();
+	memcg = mem_cgroup_from_task(rcu_dereference(mm->owner));
+	total = (long)(memcg->res.limit >> PAGE_SHIFT) + 1L;
+	if (total > (totalram_pages - hugetlb_total_pages())) {
+		rcu_read_unlock();
+		return __vm_enough_memory_never(mm, pages, cap_sys_admin);
+	}
+	rcu_read_unlock();
+
+	vm_acct_get_config(mm, &v);
+
+	allowed = total * v.overcommit_ratio / 100;
+	/*
+	 * Leave the last 3% for root
+	 */
+	if (!cap_sys_admin)
+		allowed -= allowed / 32;
+	allowed += total_swap_pages;
+
+	/* Don't let a single process grow too big:
+	   leave 3% of the size of this process for other processes */
+	allowed -= mm->total_vm / 32;
+
+	/*
+	 * cast `allowed' as a signed long because vm_committed_space
+	 * sometimes has a negative value
+	 */
+	if (atomic_long_read(&v.vm_committed_space) < (long)allowed)
+		return 0;
+
+	return -ENOMEM;
+},
+

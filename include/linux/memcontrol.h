@@ -163,6 +163,13 @@ void mem_cgroup_split_huge_fixup(struct page *head, struct page *tail);
 bool mem_cgroup_bad_page_check(struct page *page);
 void mem_cgroup_print_bad_page(struct page *page);
 #endif
+
+extern int mem_cgroup_vm_enough_memory_guess(struct mm_struct *mm, long pages,
+					     int cap_sys_admin);
+
+extern int mem_cgroup_vm_enough_memory_never(struct mm_struct *mm, long pages,
+					     int cap_sys_admin);
+
 #else /* CONFIG_CGROUP_MEM_RES_CTLR */
 struct mem_cgroup;
 
@@ -372,6 +379,21 @@ static inline void mem_cgroup_replace_page_cache(struct page *oldpage,
 				struct page *newpage)
 {
 }
+
+static inline int mem_cgroup_vm_enough_memory_guess(struct mm_struct *mm,
+						    long pages,
+						    int cap_sys_admin)
+{
+        return __vm_enough_memory_guess(mm, pages, cap_sys_admin);
+}
+
+static inline int mem_cgroup_vm_enough_memory_never(struct mm_struct *mm,
+						    long pages,
+						    int cap_sys_admin)
+{
+        return __vm_enough_memory_never(mm, pages, cap_sys_admin);
+}
+
 #endif /* CONFIG_CGROUP_MEM_CONT */
 
 #if !defined(CONFIG_CGROUP_MEM_RES_CTLR) || !defined(CONFIG_DEBUG_VM)

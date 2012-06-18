@@ -126,14 +126,36 @@ static inline struct shmem_sb_info *SHMEM_SB(struct super_block *sb)
  */
 static inline int shmem_acct_size(unsigned long flags, loff_t size)
 {
-	return (flags & VM_NORESERVE) ?
-		0 : security_vm_enough_memory_kern(VM_ACCT(size));
+        if (flags & VM_NORESERVE)
+                return 0;
+        else
+        {
+                /*
+                 * TODO: find a way to correctly account shared memory also for
+                 * the cgroup memory controller, as well as non-shared memory.
+                 * For now simply undo the accounting in the cgroup's committed
+                 * space and report the size only in the global committed
+                 * memory.
+                 */
+                mem_cgroup_vm_acct_memory(current->mm, -VM_ACCT(size));
+                return security_vm_enough_memory_kern(VM_ACCT(size));
+        }
 }
 
 static inline void shmem_unacct_size(unsigned long flags, loff_t size)
 {
-	if (!(flags & VM_NORESERVE))
-		vm_unacct_memory(VM_ACCT(size));
+        if (!(flags & VM_NORESERVE))
+        {
+                /*
+                 * TODO: find a way to correctly account shared memory also for
+                 * the cgroup memory controller, as well as non-shared memory.
+                 * For now simply undo the accounting in the cgroup's committed
+                 * space and report the size only in the global committed
+                 * memory.
+                 */
+                mem_cgroup_vm_acct_memory(current->mm, VM_ACCT(size));
+                vm_unacct_memory(current->mm, VM_ACCT(size));
+        }
 }
 
 /*
@@ -144,14 +166,41 @@ static inline void shmem_unacct_size(unsigned long flags, loff_t size)
  */
 static inline int shmem_acct_block(unsigned long flags)
 {
-	return (flags & VM_NORESERVE) ?
-		security_vm_enough_memory_kern(VM_ACCT(PAGE_CACHE_SIZE)) : 0;
+        if (flags & VM_NORESERVE)
+        {
+                /*
+                 * TODO: find a way to correctly account shared memory also for
+                 * the cgroup memory controller, as well as non-shared memory.
+                 * For now simply undo the accounting in the cgroup's committed
+                 * space and report the size only in the global committed
+                 * memory.
+                 */
+                mem_cgroup_vm_acct_memory(current->mm,
+                                          -VM_ACCT(PAGE_CACHE_SIZE));
+                return security_vm_enough_memory_kern(
+                        VM_ACCT(PAGE_CACHE_SIZE));
+        }
+        else
+                return 0;
 }
 
 static inline void shmem_unacct_blocks(unsigned long flags, long pages)
 {
-	if (flags & VM_NORESERVE)
-		vm_unacct_memory(pages * VM_ACCT(PAGE_CACHE_SIZE));
+        if (flags & VM_NORESERVE)
+        {
+                /*
+                 * TODO: find a way to correctly account shared memory also for
+                 * the cgroup memory controller, as well as non-shared memory.
+                 * For now simply undo the accounting in the cgroup's committed
+                 * space and report the size only in the global committed
+                 * memory.
+                 */
+
+                mem_cgroup_vm_acct_memory(current->mm,
+                                          pages * VM_ACCT(PAGE_CACHE_SIZE));
+                vm_unacct_memory(current->mm,
+                                 pages * VM_ACCT(PAGE_CACHE_SIZE));
+        }
 }
 
 static const struct super_operations shmem_ops;

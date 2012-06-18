@@ -24,6 +24,7 @@
 #include <linux/profile.h>
 #include <linux/export.h>
 #include <linux/mount.h>
+#include <linux/memcontrol.h>
 #include <linux/mempolicy.h>
 #include <linux/rmap.h>
 #include <linux/mmu_notifier.h>
@@ -124,78 +125,25 @@ struct percpu_counter vm_committed_as ____cacheline_aligned_in_smp;
  */
 int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 {
-	unsigned long free, allowed;
+        struct vm_acct_values v;
 
-	vm_acct_memory(pages);
+        vm_acct_get_config(mm, &v);
+        vm_acct_memory(mm, pages);
 
-	/*
-	 * Sometimes we want to use more memory than we have
-	 */
-	if (sysctl_overcommit_memory == OVERCOMMIT_ALWAYS)
-		return 0;
+        switch (v.overcommit_memory)
+        {
+        case OVERCOMMIT_ALWAYS:
+                return 0;
 
-	if (sysctl_overcommit_memory == OVERCOMMIT_GUESS) {
-		free = global_page_state(NR_FREE_PAGES);
-		free += global_page_state(NR_FILE_PAGES);
-
-		/*
-		 * shmem pages shouldn't be counted as free in this
-		 * case, they can't be purged, only swapped out, and
-		 * that won't affect the overall amount of available
-		 * memory in the system.
-		 */
-		free -= global_page_state(NR_SHMEM);
-
-		free += nr_swap_pages;
-
-		/*
-		 * Any slabs which are created with the
-		 * SLAB_RECLAIM_ACCOUNT flag claim to have contents
-		 * which are reclaimable, under pressure.  The dentry
-		 * cache and most inode caches should fall into this
-		 */
-		free += global_page_state(NR_SLAB_RECLAIMABLE);
-
-		/*
-		 * Leave reserved pages. The pages are not for anonymous pages.
-		 */
-		if (free <= totalreserve_pages)
-			goto error;
-		else
-			free -= totalreserve_pages;
-
-		/*
-		 * Leave the last 3% for root
-		 */
-		if (!cap_sys_admin)
-			free -= free / 32;
-
-		if (free > pages)
-			return 0;
-
-		goto error;
-	}
-
-	allowed = (totalram_pages - hugetlb_total_pages())
-	       	* sysctl_overcommit_ratio / 100;
-	/*
-	 * Leave the last 3% for root
-	 */
-	if (!cap_sys_admin)
-		allowed -= allowed / 32;
-	allowed += total_swap_pages;
-
-	/* Don't let a single process grow too big:
-	   leave 3% of the size of this process for other processes */
-	if (mm)
-		allowed -= mm->total_vm / 32;
-
-	if (percpu_counter_read_positive(&vm_committed_as) < allowed)
-		return 0;
-error:
-	vm_unacct_memory(pages);
-
-	return -ENOMEM;
+        case OVERCOMMIT_GUESS:
+                return mem_cgroup_vm_enough_memory_guess(mm, pages,
+                                                         cap_sys_admin);
+        case OVERCOMMIT_NEVER:
+                return mem_cgroup_vm_enough_memory_never(mm, pages,
+                                                         cap_sys_admin);
+        default:
+                BUG();
+        }
 }
 
 /*
@@ -1362,7 +1310,7 @@ free_vma:
 	kmem_cache_free(vm_area_cachep, vma);
 unacct_error:
 	if (charged)
-		vm_unacct_memory(charged);
+		vm_unacct_memory(mm, charged);
 	return error;
 }
 
@@ -1981,7 +1929,7 @@ static void unmap_region(struct mm_struct *mm,
 	tlb_gather_mmu(&tlb, mm, 0);
 	update_hiwater_rss(mm);
 	unmap_vmas(&tlb, vma, start, end, &nr_accounted, NULL);
-	vm_unacct_memory(nr_accounted);
+	vm_unacct_memory(mm, nr_accounted);
 	free_pgtables(&tlb, vma, prev ? prev->vm_end : FIRST_USER_ADDRESS,
 				 next ? next->vm_start : 0);
 	tlb_finish_mmu(&tlb, start, end);
@@ -2304,7 +2252,7 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 	 */
 	vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);
 	if (!vma) {
-		vm_unacct_memory(len >> PAGE_SHIFT);
+		vm_unacct_memory(mm, len >> PAGE_SHIFT);
 		return -ENOMEM;
 	}
 
@@ -2360,7 +2308,7 @@ void exit_mmap(struct mm_struct *mm)
 	/* update_hiwater_rss(mm) here? but nobody should be looking */
 	/* Use -1 here to ensure all VMAs in the mm are unmapped */
 	end = unmap_vmas(&tlb, vma, 0, -1, &nr_accounted, NULL);
-	vm_unacct_memory(nr_accounted);
+	vm_unacct_memory(mm, nr_accounted);
 
 	free_pgtables(&tlb, vma, FIRST_USER_ADDRESS, 0);
 	tlb_finish_mmu(&tlb, 0, end);

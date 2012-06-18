@@ -1877,7 +1877,7 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 {
 	unsigned long free, allowed;
 
-	vm_acct_memory(pages);
+	vm_acct_memory(mm, pages);
 
 	/*
 	 * Sometimes we want to use more memory than we have
@@ -1944,7 +1944,7 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 		return 0;
 
 error:
-	vm_unacct_memory(pages);
+	vm_unacct_memory(mm, pages);
 
 	return -ENOMEM;
 }
